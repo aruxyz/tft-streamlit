@@ -123,7 +123,7 @@ def build_bmkg_forecast_frame(df):
             new_row['date'] = date
             new_row['precipMM'] = 0.0
             new_row['month'] = str(date.month)
-            new_row['day_of_week'] = str(date.dayofweek)
+            new_row['day_of_week'] = str(date.dayofweek + 1)
             new_row['day_of_year'] = date.dayofyear
             new_row['year'] = date.year
             placeholder_rows.append(new_row)
