@@ -38,7 +38,8 @@ def load_model_and_metadata():
 
         checkpoint = torch.load(
             "models/tft_model_final_chronological.ckpt",
-            map_location=torch.device("cpu")
+            map_location=torch.device("cpu"),
+            weights_only=False
         )
 
         unknown_params = ['dataset_parameters', 'mask_bias', 'monotone_constraints']
