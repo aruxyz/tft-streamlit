@@ -74,22 +74,32 @@ st.markdown("---")
 @st.cache_data
 def load_data():
     try:
-        df = pd.read_csv("data/bogor_daily_val_safe.csv")
-        df['date'] = pd.to_datetime(df['date'])
-        df = df.sort_values('date').reset_index(drop=True)
-        df['time_idx'] = range(TRAIN_OFFSET, TRAIN_OFFSET + len(df))
-        df['group_id'] = 'Bogor'
+        train_df = pd.read_csv("data/bogor_daily_train_safe.csv")
+        train_df['date'] = pd.to_datetime(train_df['date'])
+        train_df = train_df.sort_values('date').reset_index(drop=True)
+        train_df['time_idx'] = range(len(train_df))
+        train_df['group_id'] = 'Bogor'
         for col in ['month', 'day_of_week', 'uvIndex']:
-            if col in df.columns:
-                df[col] = df[col].astype(str)
-        return df
+            if col in train_df.columns:
+                train_df[col] = train_df[col].astype(str)
+
+        val_df = pd.read_csv("data/bogor_daily_val_safe.csv")
+        val_df['date'] = pd.to_datetime(val_df['date'])
+        val_df = val_df.sort_values('date').reset_index(drop=True)
+        val_df['time_idx'] = range(TRAIN_OFFSET, TRAIN_OFFSET + len(val_df))
+        val_df['group_id'] = 'Bogor'
+        for col in ['month', 'day_of_week', 'uvIndex']:
+            if col in val_df.columns:
+                val_df[col] = val_df[col].astype(str)
+
+        return train_df, val_df
     except Exception as e:
         st.error(f"Gagal memuat data: {str(e)}")
-        return None
+        return None, None
 
-df_all = load_data()
+train_df, val_df = load_data()
 
-if df_all is None:
+if train_df is None or val_df is None:
     st.stop()
 
 @st.cache_data
@@ -108,16 +118,15 @@ bmkg_data = load_bmkg_data()
 if bmkg_data is None:
     st.stop()
 
-def build_bmkg_forecast_frame(df):
+def build_bmkg_forecast_frame(val_df, train_df):
+    val_extended = val_df.copy()
     forecast_dates = pd.date_range(BMKG_START_DATE, periods=PREDICTION_LENGTH, freq='D')
-    forecast_frame = df.copy()
-    existing_dates = set(forecast_frame['date'])
-    missing_dates = [date for date in forecast_dates if date not in existing_dates]
+    existing_dates = set(val_extended['date'])
+    missing_dates = [d for d in forecast_dates if d not in existing_dates]
 
     if missing_dates:
-        last_row = forecast_frame.iloc[-1].copy()
+        last_row = val_extended.iloc[-1].copy()
         placeholder_rows = []
-
         for date in missing_dates:
             new_row = last_row.copy()
             new_row['date'] = date
@@ -127,25 +136,29 @@ def build_bmkg_forecast_frame(df):
             new_row['day_of_year'] = date.dayofyear
             new_row['year'] = date.year
             placeholder_rows.append(new_row)
-
-        forecast_frame = pd.concat(
-            [forecast_frame, pd.DataFrame(placeholder_rows)],
+        val_extended = pd.concat(
+            [val_extended, pd.DataFrame(placeholder_rows)],
             ignore_index=True
         )
 
-    forecast_frame = forecast_frame.sort_values('date').reset_index(drop=True)
-    forecast_frame['time_idx'] = range(TRAIN_OFFSET, TRAIN_OFFSET + len(forecast_frame))
-    forecast_frame['group_id'] = 'Bogor'
-
-    for col in forecast_frame.columns:
-        if col not in ['date', 'group_id'] and forecast_frame[col].dtype != 'object':
-            forecast_frame[col] = forecast_frame[col].ffill().bfill()
-
+    val_extended = val_extended.sort_values('date').reset_index(drop=True)
+    for col in val_extended.columns:
+        if col not in ['date', 'group_id'] and val_extended[col].dtype != 'object':
+            val_extended[col] = val_extended[col].ffill().bfill()
     for col in ['month', 'day_of_week', 'uvIndex']:
-        if col in forecast_frame.columns:
-            forecast_frame[col] = forecast_frame[col].astype(str)
+        if col in val_extended.columns:
+            val_extended[col] = val_extended[col].astype(str)
 
-    return forecast_frame
+    # Persis seperti Kaggle notebook SS7
+    full_extended = pd.concat(
+        [train_df, val_extended.iloc[-(ENCODER_LENGTH + PREDICTION_LENGTH):]],
+        ignore_index=True
+    )
+    for col in ['month', 'day_of_week', 'uvIndex', 'group_id']:
+        if col in full_extended.columns:
+            full_extended[col] = full_extended[col].astype(str)
+
+    return full_extended
 
 selected_date = BMKG_START_DATE.date()
 
@@ -161,9 +174,9 @@ st.sidebar.info(f"""
 prediction_start = pd.Timestamp(selected_date)
 encoder_start = prediction_start - timedelta(days=ENCODER_LENGTH)
 
-df_encoder = df_all[
-    (df_all['date'] >= encoder_start) &
-    (df_all['date'] < prediction_start)
+df_encoder = val_df[
+    (val_df['date'] >= encoder_start) &
+    (val_df['date'] < prediction_start)
 ].copy()
 
 with st.expander(f"Lihat Data Input ({ENCODER_LENGTH} Hari Terakhir)", expanded=False):
@@ -190,7 +203,7 @@ if predict_btn:
         progress_bar.progress(20)
 
         try:
-            df_pred = build_bmkg_forecast_frame(df_all)
+            df_pred = build_bmkg_forecast_frame(val_df, train_df)
 
             dataset = TimeSeriesDataSet.from_dataset(
                 metadata,
@@ -259,20 +272,10 @@ if predict_btn:
                 st.subheader("Grafik Prediksi TFT vs Aktual BMKG")
                 fig, ax = plt.subplots(figsize=(12, 6))
 
-                ax.plot(
-                    range(len(df_historical)),
-                    df_historical['rainfall_mm'],
-                    color='black',
-                    linewidth=2,
-                    label=f'Data Historis ({ENCODER_LENGTH} Hari)',
-                    marker='o',
-                    markersize=3
-                )
-
-                x_forecast = range(len(df_historical), len(df_historical) + PREDICTION_LENGTH)
+                days = list(range(1, PREDICTION_LENGTH + 1))
 
                 ax.fill_between(
-                    x_forecast,
+                    days,
                     np.minimum(actual_7day, predictions),
                     np.maximum(actual_7day, predictions),
                     alpha=0.2,
@@ -281,45 +284,33 @@ if predict_btn:
                 )
 
                 ax.plot(
-                    x_forecast,
+                    days,
                     actual_7day,
                     color='black',
                     linewidth=2,
                     label='Aktual BMKG',
                     marker='o',
-                    markersize=6
+                    markersize=8
                 )
 
                 ax.plot(
-                    x_forecast,
+                    days,
                     predictions,
                     color='steelblue',
                     linewidth=2,
-                    label=f'Prediksi TFT ({PREDICTION_LENGTH} Hari)',
+                    label='Prediksi TFT',
                     marker='s',
-                    markersize=6
+                    markersize=8
                 )
 
-                ax.axvline(
-                    x=len(df_historical) - 0.5,
-                    color='gray',
-                    linestyle=':',
-                    linewidth=1,
-                    alpha=0.5,
-                    label='Awal Prediksi'
-                )
-
-                ax.set_xlabel('Hari')
+                ax.set_xlabel('Tanggal')
                 ax.set_ylabel('Curah Hujan (mm)')
                 ax.set_title(f'Prediksi TFT vs Aktual BMKG (1-7 Juni 2025)\nMAE={mae_bmkg:.2f} mm, RMSE={rmse_bmkg:.2f} mm')
                 ax.legend(loc='best')
                 ax.grid(True, alpha=0.3)
-                ax.set_xlim(-1, len(df_historical) + PREDICTION_LENGTH)
-
-                all_dates = list(df_historical['date'].dt.strftime('%d-%b')) + \
-                           [d.strftime('%d-%b') for d in forecast_dates]
-                ax.set_xticks(range(len(all_dates)))
-                ax.set_xticklabels(all_dates, rotation=45, ha='right')
+                ax.set_xlim(0.5, PREDICTION_LENGTH + 0.5)
+                ax.set_xticks(days)
+                ax.set_xticklabels([d.strftime('%d %b') for d in forecast_dates], rotation=45, ha='right')
 
                 plt.tight_layout()
                 st.pyplot(fig)

@@ -43,15 +43,26 @@ model.eval()
 print("  Model loaded OK")
 
 print("\n[3/6] Loading data...")
-df_all = pd.read_csv("data/bogor_daily_val_safe.csv")
-df_all['date'] = pd.to_datetime(df_all['date'])
-df_all = df_all.sort_values('date').reset_index(drop=True)
-df_all['time_idx'] = range(TRAIN_OFFSET, TRAIN_OFFSET + len(df_all))
-df_all['group_id'] = 'Bogor'
+train_df = pd.read_csv("data/bogor_daily_train_safe.csv")
+train_df['date'] = pd.to_datetime(train_df['date'])
+train_df = train_df.sort_values('date').reset_index(drop=True)
+train_df['time_idx'] = range(len(train_df))
+train_df['group_id'] = 'Bogor'
 for col in ['month', 'day_of_week', 'uvIndex']:
-    if col in df_all.columns:
-        df_all[col] = df_all[col].astype(str)
-print(f"  Data rows: {len(df_all)} | Date range: {df_all['date'].min()} to {df_all['date'].max()}")
+    if col in train_df.columns:
+        train_df[col] = train_df[col].astype(str)
+
+val_df = pd.read_csv("data/bogor_daily_val_safe.csv")
+val_df['date'] = pd.to_datetime(val_df['date'])
+val_df = val_df.sort_values('date').reset_index(drop=True)
+val_df['time_idx'] = range(TRAIN_OFFSET, TRAIN_OFFSET + len(val_df))
+val_df['group_id'] = 'Bogor'
+for col in ['month', 'day_of_week', 'uvIndex']:
+    if col in val_df.columns:
+        val_df[col] = val_df[col].astype(str)
+
+df_all = val_df.copy()
+print(f"  Train rows: {len(train_df)} | Val rows: {len(val_df)}")
 
 print("\n[4/6] Loading BMKG data...")
 bmkg = pd.read_csv("data/juni.csv")
@@ -60,42 +71,47 @@ bmkg = bmkg.sort_values('TANGGAL').reset_index(drop=True)
 bmkg_7day = bmkg.head(PREDICTION_LENGTH).copy()
 print(f"  BMKG rows: {len(bmkg)} | First 7 dates: {list(bmkg_7day['TANGGAL'].dt.date)}")
 
-print("\n[5/6] Building forecast frame...")
+print("\n[5/6] Building forecast frame (train + val[-97:] like notebook)...")
+# Persis seperti Kaggle notebook SS7
+val_extended = val_df.copy()
 forecast_dates = pd.date_range(BMKG_START_DATE, periods=PREDICTION_LENGTH, freq='D')
-forecast_frame = df_all.copy()
-existing_dates = set(forecast_frame['date'])
+existing_dates = set(val_extended['date'])
 missing_dates = [d for d in forecast_dates if d not in existing_dates]
 print(f"  Missing dates to add: {[str(d.date()) for d in missing_dates]}")
 
 if missing_dates:
-    last_row = forecast_frame.iloc[-1].copy()
+    last_row = val_extended.iloc[-1].copy()
     placeholder_rows = []
     for date in missing_dates:
         new_row = last_row.copy()
         new_row['date'] = date
         new_row['precipMM'] = 0.0
         new_row['month'] = str(date.month)
-        new_row['day_of_week'] = str(date.dayofweek + 1)  # 1-indexed!
+        new_row['day_of_week'] = str(date.dayofweek + 1)
         new_row['day_of_year'] = date.dayofyear
         new_row['year'] = date.year
         placeholder_rows.append(new_row)
-    forecast_frame = pd.concat([forecast_frame, pd.DataFrame(placeholder_rows)], ignore_index=True)
+    val_extended = pd.concat([val_extended, pd.DataFrame(placeholder_rows)], ignore_index=True)
 
-forecast_frame = forecast_frame.sort_values('date').reset_index(drop=True)
-forecast_frame['time_idx'] = range(TRAIN_OFFSET, TRAIN_OFFSET + len(forecast_frame))
-forecast_frame['group_id'] = 'Bogor'
-
-for col in forecast_frame.columns:
-    if col not in ['date', 'group_id'] and forecast_frame[col].dtype != 'object':
-        forecast_frame[col] = forecast_frame[col].ffill().bfill()
-
+val_extended = val_extended.sort_values('date').reset_index(drop=True)
+for col in val_extended.columns:
+    if col not in ['date', 'group_id'] and val_extended[col].dtype != 'object':
+        val_extended[col] = val_extended[col].ffill().bfill()
 for col in ['month', 'day_of_week', 'uvIndex']:
+    if col in val_extended.columns:
+        val_extended[col] = val_extended[col].astype(str)
+
+# concat train + last 97 baris val — PERSIS NOTEBOOK
+forecast_frame = pd.concat(
+    [train_df, val_extended.iloc[-(ENCODER_LENGTH + PREDICTION_LENGTH):]],
+    ignore_index=True
+)
+for col in ['month', 'day_of_week', 'uvIndex', 'group_id']:
     if col in forecast_frame.columns:
         forecast_frame[col] = forecast_frame[col].astype(str)
 
-print(f"  Forecast frame rows: {len(forecast_frame)}")
+print(f"  full_extended rows: {len(forecast_frame)}")
 print(f"  Last 10 rows day_of_week: {list(forecast_frame['day_of_week'].tail(10))}")
-print(f"  Last 10 rows group_id: {list(forecast_frame['group_id'].tail(10))}")
 
 print("\n[6/6] Running prediction...")
 try:
