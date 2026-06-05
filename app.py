@@ -78,7 +78,7 @@ def load_data():
         df['date'] = pd.to_datetime(df['date'])
         df = df.sort_values('date').reset_index(drop=True)
         df['time_idx'] = range(TRAIN_OFFSET, TRAIN_OFFSET + len(df))
-        df['group_id'] = '0'
+        df['group_id'] = 'bogor'
         for col in ['month', 'day_of_week', 'uvIndex']:
             if col in df.columns:
                 df[col] = df[col].astype(str)
@@ -135,7 +135,7 @@ def build_bmkg_forecast_frame(df):
 
     forecast_frame = forecast_frame.sort_values('date').reset_index(drop=True)
     forecast_frame['time_idx'] = range(TRAIN_OFFSET, TRAIN_OFFSET + len(forecast_frame))
-    forecast_frame['group_id'] = '0'
+    forecast_frame['group_id'] = 'bogor'
 
     for col in forecast_frame.columns:
         if col not in ['date', 'group_id'] and forecast_frame[col].dtype != 'object':
