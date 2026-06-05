@@ -158,10 +158,8 @@ if predict_btn:
             df_pred['time_idx'] = range(len(df_pred))
             df_pred['group'] = 'bogor'
 
-            max_encoder_idx = df_pred[df_pred['date'] < prediction_start]['time_idx'].max()
-
-            training = TimeSeriesDataSet(
-                df_pred[df_pred['time_idx'] <= max_encoder_idx],
+            dataset = TimeSeriesDataSet(
+                df_pred,
                 time_idx="time_idx",
                 target="precipMM",
                 group_ids=["group"],
@@ -183,15 +181,19 @@ if predict_btn:
                 add_relative_time_idx=True,
                 add_target_scales=True,
                 add_encoder_length=True,
+                predict_mode=True,
             )
 
-            val_dataloader = training.to_dataloader(train=False, batch_size=1, num_workers=0)
+            val_dataloader = dataset.to_dataloader(train=False, batch_size=1, num_workers=0)
 
             progress_bar.progress(50)
 
-            raw_predictions = model.predict(val_dataloader, mode="raw", return_x=True)
-            predictions_output = raw_predictions[0]
-            quantile_predictions = predictions_output.prediction
+            raw_output = model.predict(val_dataloader, mode="raw", return_x=True)
+            quantile_predictions = raw_output.output.prediction
+
+            num_samples = quantile_predictions.shape[0]
+            if num_samples > 1:
+                quantile_predictions = quantile_predictions[-1:]
 
             progress_bar.progress(70)
 
