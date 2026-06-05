@@ -189,17 +189,44 @@ if predict_btn:
             progress_bar.progress(50)
 
             raw_output = model.predict(val_dataloader, mode="raw", return_x=True)
-            quantile_predictions = raw_output.output.prediction
-
-            num_samples = quantile_predictions.shape[0]
-            if num_samples > 1:
-                quantile_predictions = quantile_predictions[-1:]
+            pred_output = raw_output.output
 
             progress_bar.progress(70)
 
-            p10 = quantile_predictions[:, :, 0].detach().cpu().numpy().flatten()
-            p50 = quantile_predictions[:, :, 1].detach().cpu().numpy().flatten()
-            p90 = quantile_predictions[:, :, 2].detach().cpu().numpy().flatten()
+            if hasattr(pred_output, 'prediction'):
+                quantile_predictions = pred_output.prediction
+            else:
+                quantile_predictions = pred_output
+
+            if len(quantile_predictions.shape) == 3:
+                num_samples = quantile_predictions.shape[0]
+                if num_samples > 1:
+                    quantile_predictions = quantile_predictions[-1:]
+
+                n_quantiles = quantile_predictions.shape[2]
+                if n_quantiles >= 3:
+                    p10 = quantile_predictions[:, :, 0].detach().cpu().numpy().flatten()
+                    p50 = quantile_predictions[:, :, 1].detach().cpu().numpy().flatten()
+                    p90 = quantile_predictions[:, :, 2].detach().cpu().numpy().flatten()
+                elif n_quantiles == 2:
+                    p10 = quantile_predictions[:, :, 0].detach().cpu().numpy().flatten()
+                    p50 = (quantile_predictions[:, :, 0] + quantile_predictions[:, :, 1]).detach().cpu().numpy().flatten() / 2
+                    p90 = quantile_predictions[:, :, 1].detach().cpu().numpy().flatten()
+                else:
+                    p50 = quantile_predictions[:, :, 0].detach().cpu().numpy().flatten()
+                    p10 = p50 * 0.8
+                    p90 = p50 * 1.2
+            elif len(quantile_predictions.shape) == 2:
+                num_samples = quantile_predictions.shape[0]
+                if num_samples > 1:
+                    quantile_predictions = quantile_predictions[-1:]
+                p50 = quantile_predictions.detach().cpu().numpy().flatten()
+                p10 = p50 * 0.8
+                p90 = p50 * 1.2
+            else:
+                p50 = quantile_predictions.detach().cpu().numpy().flatten()
+                p10 = p50 * 0.8
+                p90 = p50 * 1.2
 
             predictions = np.maximum(p50, 0)
             p10 = np.maximum(p10, 0)
