@@ -6,7 +6,7 @@ torch==2.1.0
 pytorch-lightning==2.1.0
 
 # PyTorch Forecasting
-pytorch-forecasting==1.0.0
+pytorch-forecasting==0.10.3
 
 # Data Processing
 pandas==2.1.3
