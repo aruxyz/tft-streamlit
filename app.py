@@ -13,8 +13,9 @@ try:
     from pytorch_forecasting import TemporalFusionTransformer, TimeSeriesDataSet
     from pytorch_forecasting.data import GroupNormalizer
 except ImportError:
-    st.error("❌ Library pytorch_forecasting belum terinstall. Jalankan: pip install -r requirements.txt")
+    st.error("Library pytorch_forecasting belum terinstall. Jalankan: pip install -r requirements.txt")
     st.stop()
+
 st.set_page_config(
     page_title="Bogor Rain Forecast",
     page_icon="🌧️",
@@ -23,17 +24,22 @@ st.set_page_config(
 )
 
 st.title("🌧️ Bogor Rainfall Forecasting (TFT Model)")
-st.write("Aplikasi demo skripsi untuk memprediksi curah hujan harian di Bogor.")
-
+st.write("Aplikasi demo skripsi untuk memprediksi curah hujan harian di Bogor menggunakan Temporal Fusion Transformer.")
 st.markdown("---")
+
+ENCODER_LENGTH = 90
+PREDICTION_LENGTH = 7
+
 @st.cache_resource
 def load_model_and_metadata():
-    """Load model TFT dan metadata dataset dengan caching agar tidak dimuat ulang setiap interaksi"""
     try:
         with open("models/dataset_metadata.pkl", "rb") as f:
             metadata = pickle.load(f)
 
-        checkpoint = torch.load("models/tft_model_final.ckpt", map_location=torch.device("cpu"))
+        checkpoint = torch.load(
+            "models/tft_model_final_chronological.ckpt",
+            map_location=torch.device("cpu")
+        )
 
         unknown_params = ['dataset_parameters', 'mask_bias', 'monotone_constraints']
         for param in unknown_params:
@@ -52,150 +58,218 @@ def load_model_and_metadata():
 
         return model, metadata
     except Exception as e:
-        st.error(f"❌ Gagal memuat model: {str(e)}")
+        st.error(f"Gagal memuat model: {str(e)}")
         raise
-with st.spinner('⏳ Sedang memuat model AI...'):
+
+with st.spinner('Sedang memuat model AI...'):
     model, metadata = load_model_and_metadata()
-    st.success("✅ Model TFT & Metadata Berhasil Dimuat!")
-    st.caption("Model menggunakan Temporal Fusion Transformer (TFT) dengan PyTorch Lightning")
+    st.success("Model TFT & Metadata Berhasil Dimuat!")
+    st.caption(f"Encoder: {ENCODER_LENGTH} hari | Prediksi: {PREDICTION_LENGTH} hari | Parameter: 393.559")
 
 st.markdown("---")
+
 @st.cache_data
-def load_sample_data():
+def load_data():
     try:
-        df = pd.read_csv("data/val_data_sample.csv")
+        df = pd.read_csv("data/bogor_daily_val_safe.csv")
         df['date'] = pd.to_datetime(df['date'])
         df = df.sort_values('date').reset_index(drop=True)
+        df['time_idx'] = range(len(df))
+        df['group'] = 'bogor'
         return df
     except Exception as e:
-        st.error(f"❌ Gagal memuat data sampel: {str(e)}")
+        st.error(f"Gagal memuat data: {str(e)}")
         return None
 
-df_sample = load_sample_data()
+df_all = load_data()
 
-if df_sample is None:
+if df_all is None:
     st.stop()
 
+min_date = df_all['date'].min() + timedelta(days=ENCODER_LENGTH)
+max_date_limit = pd.Timestamp('2025-06-01')
+max_date = min(df_all['date'].max() - timedelta(days=PREDICTION_LENGTH), max_date_limit)
 
-# Filter tanggal yang bisa dipilih (harus punya cukup data historis 30 hari sebelumnya)
-min_date = df_sample['date'].min() + timedelta(days=30)
-max_date_limit = pd.Timestamp('2025-07-07')
-max_date = min(df_sample['date'].max() - timedelta(days=7), max_date_limit)
-
-valid_dates = df_sample[
-    (df_sample['date'] >= min_date) &
-    (df_sample['date'] <= max_date)
+valid_dates = df_all[
+    (df_all['date'] >= min_date) &
+    (df_all['date'] <= max_date)
 ]['date'].dt.date.unique()
 
 valid_dates = sorted(valid_dates)
 
 if len(valid_dates) == 0:
-    st.warning("⚠️ Tidak ada tanggal yang tersedia untuk simulasi.")
+    st.warning("Tidak ada tanggal yang tersedia untuk simulasi.")
     st.stop()
+
 selected_date = st.sidebar.selectbox(
-    "📅 Pilih Tanggal Awal Prediksi (H+1):",
+    "Pilih Tanggal Awal Prediksi (H+1):",
     options=valid_dates,
     format_func=lambda x: x.strftime("%d %B %Y"),
     index=len(valid_dates) // 2,
-    help="Model akan menggunakan data 30 hari sebelum tanggal ini sebagai input encoder"
+    help=f"Model akan menggunakan data {ENCODER_LENGTH} hari sebelum tanggal ini sebagai input encoder"
 )
 
 st.sidebar.info(f"""
 📋 **Informasi Prediksi:**
 - Tanggal Prediksi: **{selected_date.strftime('%d %B %Y')}**
-- Input Encoder: **30 hari** data historis
-- Output Decoder: **7 hari** prediksi ke depan
+- Input Encoder: **{ENCODER_LENGTH} hari** data historis
+- Output Decoder: **{PREDICTION_LENGTH} hari** prediksi ke depan
+- Fitur Input: **25 variabel** cuaca & derived
 """)
+
 prediction_start = pd.Timestamp(selected_date)
-encoder_start = prediction_start - timedelta(days=30)
-df_encoder = df_sample[
-    (df_sample['date'] >= encoder_start) &
-    (df_sample['date'] < prediction_start)
+encoder_start = prediction_start - timedelta(days=ENCODER_LENGTH)
+
+df_encoder = df_all[
+    (df_all['date'] >= encoder_start) &
+    (df_all['date'] < prediction_start)
 ].copy()
-with st.expander("🔍 Lihat Data Input (30 Hari Terakhir)", expanded=False):
+
+with st.expander(f"Lihat Data Input ({ENCODER_LENGTH} Hari Terakhir)", expanded=False):
+    display_cols = ['date', 'precipMM', 'maxtempC', 'mintempC', 'humidity', 'pressure', 'windspeedKmph']
     st.dataframe(
-        df_encoder.style.background_gradient(cmap='Blues', subset=['rainfall_mm']),
+        df_encoder[display_cols].style.background_gradient(cmap='Blues', subset=['precipMM']),
         use_container_width=True
     )
+
 col_btn1, col_btn2, col_btn3 = st.columns([1, 2, 1])
 with col_btn2:
     predict_btn = st.button(
-        "🚀 Jalankan Prediksi",
+        "Jalankan Prediksi",
         use_container_width=True,
         type="primary"
     )
 
 if predict_btn:
     st.markdown("---")
-    st.subheader(f"📊 Hasil Forecast: 7 Hari Mulai {selected_date.strftime('%d %B %Y')}")
-    with st.spinner('🔄 Sedang memproses prediksi...'):
+    st.subheader(f"Hasil Forecast: {PREDICTION_LENGTH} Hari Mulai {selected_date.strftime('%d %B %Y')}")
+
+    with st.spinner('Sedang memproses prediksi dengan model TFT...'):
         progress_bar = st.progress(0)
-        progress_bar.progress(30)
+        progress_bar.progress(20)
 
         try:
-            df_pred = df_encoder.copy()
+            df_pred = df_all[
+                (df_all['date'] >= encoder_start) &
+                (df_all['date'] < prediction_start + timedelta(days=PREDICTION_LENGTH))
+            ].copy()
+
             df_pred['time_idx'] = range(len(df_pred))
             df_pred['group'] = 'bogor'
-            np.random.seed(int(prediction_start.timestamp()))
-            avg_rainfall = df_encoder['rainfall_mm'].mean()
-            std_rainfall = df_encoder['rainfall_mm'].std()
-            predictions = []
-            for i in range(7):
-                pred = avg_rainfall + np.random.normal(0, std_rainfall * 0.5)
-                pred = max(0, pred)
-                predictions.append(round(pred, 1))
+
+            max_encoder_idx = df_pred[df_pred['date'] < prediction_start]['time_idx'].max()
+
+            training = TimeSeriesDataSet(
+                df_pred[df_pred['time_idx'] <= max_encoder_idx],
+                time_idx="time_idx",
+                target="precipMM",
+                group_ids=["group"],
+                min_encoder_length=ENCODER_LENGTH,
+                max_encoder_length=ENCODER_LENGTH,
+                min_prediction_length=PREDICTION_LENGTH,
+                max_prediction_length=PREDICTION_LENGTH,
+                static_categoricals=["group"],
+                time_varying_known_reals=["time_idx"],
+                time_varying_unknown_reals=[
+                    "precipMM", "maxtempC", "mintempC", "avgtempC",
+                    "humidity", "pressure", "windspeedKmph",
+                    "mean_precip_static", "std_precip_static",
+                    "precip_lag_1", "precip_lag_3", "precip_lag_7",
+                    "precip_rolling_3", "precip_rolling_7", "precip_rolling_30",
+                    "precipMM_boxcox", "temp_range",
+                    "humidity_temp_interaction", "pressure_change"
+                ],
+                add_relative_time_idx=True,
+                add_target_scales=True,
+                add_encoder_length=True,
+            )
+
+            val_dataloader = training.to_dataloader(train=False, batch_size=1, num_workers=0)
+
+            progress_bar.progress(50)
+
+            raw_predictions = model.predict(val_dataloader, mode="raw", return_x=True)
+            predictions_output = raw_predictions[0]
+            quantile_predictions = predictions_output.prediction
 
             progress_bar.progress(70)
-            forecast_dates = [prediction_start + timedelta(days=i) for i in range(7)]
+
+            p10 = quantile_predictions[:, :, 0].detach().cpu().numpy().flatten()
+            p50 = quantile_predictions[:, :, 1].detach().cpu().numpy().flatten()
+            p90 = quantile_predictions[:, :, 2].detach().cpu().numpy().flatten()
+
+            predictions = np.maximum(p50, 0)
+            p10 = np.maximum(p10, 0)
+            p90 = np.maximum(p90, 0)
+
+            forecast_dates = [prediction_start + timedelta(days=i) for i in range(PREDICTION_LENGTH)]
+
             df_forecast = pd.DataFrame({
                 'date': forecast_dates,
+                'pred_p10': p10,
+                'pred_p50': p50,
+                'pred_p90': p90,
                 'rainfall_mm': predictions,
                 'type': 'prediksi'
             })
-            df_historical = df_encoder.copy()
+
+            df_historical = df_encoder[['date', 'precipMM']].copy()
+            df_historical.columns = ['date', 'rainfall_mm']
             df_historical['type'] = 'historis'
-            df_combined = pd.concat([df_historical, df_forecast], ignore_index=True)
 
             progress_bar.progress(100)
-            st.success("✅ Prediksi Berhasil!")
+            st.success("Prediksi Berhasil dengan Model TFT!")
+
             col_chart, col_stats = st.columns([2, 1])
 
             with col_chart:
-                st.subheader("📈 Grafik Prediksi Curah Hujan")
+                st.subheader("Grafik Prediksi Curah Hujan")
                 fig, ax = plt.subplots(figsize=(12, 6))
+
                 ax.plot(
                     range(len(df_historical)),
                     df_historical['rainfall_mm'],
                     color='black',
                     linewidth=2,
-                    label='Data Historis (30 Hari)',
+                    label=f'Data Historis ({ENCODER_LENGTH} Hari)',
                     marker='o',
                     markersize=3
                 )
+
+                x_forecast = range(len(df_historical) - 1, len(df_historical) + PREDICTION_LENGTH - 1)
+
+                ax.fill_between(
+                    x_forecast, p10[:PREDICTION_LENGTH], p90[:PREDICTION_LENGTH],
+                    alpha=0.2, color='steelblue', label='P10-P90 (Uncertainty Band)'
+                )
+
                 ax.plot(
-                    range(len(df_historical)-1, len(df_historical) + 6),
+                    x_forecast,
                     predictions,
                     color='red',
                     linewidth=2,
                     linestyle='--',
-                    label='Prediksi TFT (7 Hari)',
+                    label=f'Prediksi TFT ({PREDICTION_LENGTH} Hari)',
                     marker='x',
                     markersize=6
                 )
+
                 ax.axvline(
-                    x=len(df_historical)-1,
+                    x=len(df_historical) - 1,
                     color='gray',
                     linestyle=':',
                     linewidth=1,
                     alpha=0.5,
                     label='Sekarang'
                 )
+
                 ax.set_xlabel('Hari')
                 ax.set_ylabel('Curah Hujan (mm)')
-                ax.set_title('Forecast Curah Hujan Harian - Bogor')
+                ax.set_title('Forecast Curah Hujan Harian - Bogor (TFT)')
                 ax.legend(loc='best')
                 ax.grid(True, alpha=0.3)
-                ax.set_xlim(-1, len(df_historical) + 6)
+                ax.set_xlim(-1, len(df_historical) + PREDICTION_LENGTH - 2)
+
                 all_dates = list(df_historical['date'].dt.strftime('%d-%b')) + \
                            [d.strftime('%d-%b') for d in forecast_dates]
                 ax.set_xticks(range(len(all_dates)))
@@ -206,26 +280,20 @@ if predict_btn:
                 plt.close()
 
             with col_stats:
-                st.subheader("📋 Ringkasan Prediksi")
-                def categorize_rainfall(mm):
-                    if mm == 0:
-                        return "Berawan / Cerah", "🌞"
-                    elif mm < 0.5:
-                        return "Tidak ada air hujan yang turun (kering)", "☀️"
-                    elif mm < 5:
+                st.subheader("Ringkasan Prediksi")
+
+                def bmkg_category(mm):
+                    if mm < 0.5:
+                        return "Tidak Hujan", "☀️"
+                    elif mm <= 20:
                         return "Hujan Ringan", "🌤️"
-                    elif mm < 20:
+                    elif mm <= 50:
                         return "Hujan Sedang", "🌧️"
-                    elif mm < 50:
-                        return "Hujan Lebat", "⛈️"
-                    elif mm < 100:
-                        return "Hujan Sangat Lebat", "⛈️"
-                    elif mm <= 150:
-                        return "Hujan Ekstrem", "⛈️"
                     else:
-                        return "Bencana alam", "⛈️"
+                        return "Hujan Lebat", "⛈️"
+
                 tomorrow_rain = predictions[0]
-                rain_cat, rain_emoji = categorize_rainfall(tomorrow_rain)
+                rain_cat, rain_emoji = bmkg_category(tomorrow_rain)
 
                 st.metric(
                     f"{rain_emoji} Prediksi Besok (H+1)",
@@ -235,6 +303,7 @@ if predict_btn:
                 )
 
                 st.markdown("---")
+
                 avg_rain_7d = np.mean(predictions)
                 max_rain_day = np.argmax(predictions) + 1
                 max_rain_val = max(predictions)
@@ -242,65 +311,60 @@ if predict_btn:
                 col_m1, col_m2 = st.columns(2)
 
                 col_m1.metric(
-                    "📊 Rata-rata 7 Hari",
+                    "Rata-rata 7 Hari",
                     f"{avg_rain_7d:.1f} mm"
                 )
 
                 col_m2.metric(
-                    "🌊 Hari Terbasah",
+                    "Hari Terbasah",
                     f"H+{max_rain_day}",
                     f"{max_rain_val:.1f} mm"
                 )
-                st.markdown("### 📅 Tabel Prediksi Detail")
-                df_table = df_forecast[['date', 'rainfall_mm']].copy()
-                df_table['Hari'] = [f"H+{i+1}" for i in range(7)]
-                df_table['Kategori'] = df_table['rainfall_mm'].apply(
-                    lambda x: categorize_rainfall(x)[0]
-                )
-                df_table['Emoji'] = df_table['rainfall_mm'].apply(
-                    lambda x: categorize_rainfall(x)[1]
-                )
-                df_table = df_table[['Hari', 'date', 'rainfall_mm', 'Kategori', 'Emoji']]
-                df_table.columns = ['Hari', 'Tanggal', 'Curah Hujan (mm)', 'Kategori', 'Emoji']
+
+                st.markdown("### Tabel Prediksi Detail")
+                df_table = pd.DataFrame({
+                    'Hari': [f"H+{i+1}" for i in range(PREDICTION_LENGTH)],
+                    'Tanggal': [d.strftime('%d %B %Y') for d in forecast_dates],
+                    'P10 (min)': [f"{v:.1f}" for v in p10],
+                    'P50 (median)': [f"{v:.1f}" for v in p50],
+                    'P90 (max)': [f"{v:.1f}" for v in p90],
+                    'Kategori': [bmkg_category(v)[0] for v in predictions],
+                    'Emoji': [bmkg_category(v)[1] for v in predictions],
+                })
 
                 st.dataframe(
                     df_table.style.background_gradient(
                         cmap='Reds',
-                        subset=['Curah Hujan (mm)']
+                        subset=['P50 (median)']
                     ),
                     use_container_width=True,
                     hide_index=True
                 )
+
             st.markdown("---")
-            st.subheader("💡 Rekomendasi Berdasarkan Prediksi")
-            rainy_days = sum(1 for p in predictions if p > 1)
-            heavy_rain_days = sum(1 for p in predictions if p > 10)
+            st.subheader("Rekomendasi Berdasarkan Prediksi")
+            rainy_days = sum(1 for p in predictions if p > 0.5)
+            heavy_rain_days = sum(1 for p in predictions if p > 20)
 
             if rainy_days == 0:
-                st.info("🌞 Prediksi cuaca cerah untuk 7 hari ke depan. Bagus untuk aktivitas luar ruangan!")
+                st.info("Prediksi cuaca cerah untuk 7 hari ke depan. Bagus untuk aktivitas luar ruangan!")
             elif rainy_days <= 2:
-                st.warning("🌤️ Diperkirakan beberapa hari berpotensi hujan ringan. Siapkan payung jika beraktivitas di luar.")
+                st.warning("Diperkirakan beberapa hari berpotensi hujan ringan. Siapkan payung jika beraktivitas di luar.")
             elif rainy_days <= 4:
-                st.warning("🌧️ Prediksi cuaca cukup basah. Pertimbangkan untuk membawa jas hujan dan perlengkapan anti-air.")
+                st.warning("Prediksi cuaca cukup basah. Pertimbangkan untuk membawa jas hujan dan perlengkapan anti-air.")
             else:
-                st.error("⛈️ Prediksi curah hujan tinggi untuk minggu ini. Hindari aktivitas di luar dan waspada terhadap potensi banjir.")
+                st.error("Prediksi curah hujan tinggi untuk minggu ini. Hindari aktivitas di luar dan waspada terhadap potensi banjir.")
 
             if heavy_rain_days > 0:
-                st.error(f"⚠️ Peringatan: Diperkirakan ada {heavy_rain_days} hari dengan hujan lebat. Harap berhati-hati!")
+                st.error(f"Peringatan: Diperkirakan ada {heavy_rain_days} hari dengan hujan sedang/lebat. Harap berhati-hati!")
 
         except Exception as e:
-            st.error(f"❌ Terjadi kesalahan saat prediksi: {str(e)}")
+            st.error(f"Terjadi kesalahan saat prediksi: {str(e)}")
             st.exception(e)
+
 st.markdown("---")
 st.caption("""
 💻 **Powered by:** Temporal Fusion Transformer (TFT) + PyTorch Lightning + Streamlit
-📊 **Dataset:** Data curah hujan harian Bogor
-🎓 **Project:** Tesis - Prediksi Curah Hujan dengan Deep Learning
+📊 **Dataset:** Data curah hujan harian Bogor (2008-2025, 6.122 observasi)
+🎓 **Project:** Skripsi - Prediksi Curah Hujan dengan Deep Learning
 """)
-
-with st.expander("📌 Catatan Penting"):
-    st.markdown("""
-    - **Model Performance:** Model ini dilatih pada data historis dan akurasi prediksi dapat bervariasi.
-    - **Limitasi:** Prediksi berdasarkan pattern data masa lalu.
-    - **Disclaimer:** Prediksi ini hanya untuk keperluan akademis dan presentasi skripsi. 
-    """)
