@@ -188,49 +188,18 @@ if predict_btn:
 
             progress_bar.progress(50)
 
-            raw_output = model.predict(val_dataloader, mode="raw", return_x=True)
-            pred_output = raw_output.output
+            predictions_raw = model.predict(val_dataloader, mode="prediction")
+            predictions_arr = predictions_raw.detach().cpu().numpy().flatten()
 
             progress_bar.progress(70)
 
-            if hasattr(pred_output, 'prediction'):
-                quantile_predictions = pred_output.prediction
-            else:
-                quantile_predictions = pred_output
+            if len(predictions_arr) > PREDICTION_LENGTH:
+                predictions_arr = predictions_arr[-PREDICTION_LENGTH:]
 
-            if len(quantile_predictions.shape) == 3:
-                num_samples = quantile_predictions.shape[0]
-                if num_samples > 1:
-                    quantile_predictions = quantile_predictions[-1:]
-
-                n_quantiles = quantile_predictions.shape[2]
-                if n_quantiles >= 3:
-                    p10 = quantile_predictions[:, :, 0].detach().cpu().numpy().flatten()
-                    p50 = quantile_predictions[:, :, 1].detach().cpu().numpy().flatten()
-                    p90 = quantile_predictions[:, :, 2].detach().cpu().numpy().flatten()
-                elif n_quantiles == 2:
-                    p10 = quantile_predictions[:, :, 0].detach().cpu().numpy().flatten()
-                    p50 = (quantile_predictions[:, :, 0] + quantile_predictions[:, :, 1]).detach().cpu().numpy().flatten() / 2
-                    p90 = quantile_predictions[:, :, 1].detach().cpu().numpy().flatten()
-                else:
-                    p50 = quantile_predictions[:, :, 0].detach().cpu().numpy().flatten()
-                    p10 = p50 * 0.8
-                    p90 = p50 * 1.2
-            elif len(quantile_predictions.shape) == 2:
-                num_samples = quantile_predictions.shape[0]
-                if num_samples > 1:
-                    quantile_predictions = quantile_predictions[-1:]
-                p50 = quantile_predictions.detach().cpu().numpy().flatten()
-                p10 = p50 * 0.8
-                p90 = p50 * 1.2
-            else:
-                p50 = quantile_predictions.detach().cpu().numpy().flatten()
-                p10 = p50 * 0.8
-                p90 = p50 * 1.2
-
-            predictions = np.maximum(p50, 0)
-            p10 = np.maximum(p10, 0)
-            p90 = np.maximum(p90, 0)
+            predictions = np.maximum(predictions_arr, 0)
+            p10 = np.maximum(predictions_arr * 0.8, 0)
+            p50 = predictions
+            p90 = np.maximum(predictions_arr * 1.2, 0)
 
             forecast_dates = [prediction_start + timedelta(days=i) for i in range(PREDICTION_LENGTH)]
 
