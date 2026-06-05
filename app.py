@@ -150,13 +150,7 @@ if predict_btn:
         progress_bar.progress(20)
 
         try:
-            df_pred = df_all[
-                (df_all['date'] >= encoder_start) &
-                (df_all['date'] < prediction_start + timedelta(days=PREDICTION_LENGTH))
-            ].copy()
-
-            df_pred['time_idx'] = range(len(df_pred))
-            df_pred['group'] = 'bogor'
+            df_pred = df_all.copy()
 
             dataset = TimeSeriesDataSet(
                 df_pred,
@@ -184,17 +178,21 @@ if predict_btn:
                 predict_mode=True,
             )
 
-            val_dataloader = dataset.to_dataloader(train=False, batch_size=1, num_workers=0)
+            val_dataloader = dataset.to_dataloader(train=False, batch_size=64, num_workers=0)
 
             progress_bar.progress(50)
 
             predictions_raw = model.predict(val_dataloader, mode="prediction")
-            predictions_arr = predictions_raw.detach().cpu().numpy().flatten()
+            predictions_arr = predictions_raw.detach().cpu().numpy()
+
+            if len(predictions_arr.shape) == 2:
+                predictions_arr = predictions_arr[-1]
+            elif len(predictions_arr.shape) == 1:
+                predictions_arr = predictions_arr[-PREDICTION_LENGTH:]
+
+            predictions_arr = predictions_arr[:PREDICTION_LENGTH]
 
             progress_bar.progress(70)
-
-            if len(predictions_arr) > PREDICTION_LENGTH:
-                predictions_arr = predictions_arr[-PREDICTION_LENGTH:]
 
             predictions = np.maximum(predictions_arr, 0)
             p10 = np.maximum(predictions_arr * 0.8, 0)
