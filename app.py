@@ -9,7 +9,6 @@ warnings.filterwarnings('ignore')
 
 try:
     from pytorch_forecasting import TemporalFusionTransformer, TimeSeriesDataSet
-    from pytorch_forecasting.data import GroupNormalizer
 except ImportError:
     st.error("Library pytorch_forecasting belum terinstall. Jalankan: pip install -r requirements.txt")
     st.stop()
@@ -228,14 +227,14 @@ with st.expander(f"Lihat Data Input ({ENCODER_LENGTH} Hari Terakhir)", expanded=
     display_cols = ['date', 'precipMM', 'maxtempC', 'mintempC', 'humidity', 'pressure', 'windspeedKmph']
     st.dataframe(
         df_encoder[display_cols].style.background_gradient(cmap='Blues', subset=['precipMM']),
-        use_container_width=True
+        width="stretch"
     )
 
 col_btn1, col_btn2, col_btn3 = st.columns([1, 2, 1])
 with col_btn2:
     predict_btn = st.button(
         "Jalankan Prediksi",
-        use_container_width=True,
+        width="stretch",
         type="primary"
     )
 
@@ -374,7 +373,7 @@ if predict_btn:
             })
             st.dataframe(
                 df_table,
-                use_container_width=True,
+                width="stretch",
                 hide_index=True
             )
 

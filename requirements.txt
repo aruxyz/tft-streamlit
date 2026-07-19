@@ -3,14 +3,14 @@ streamlit>=1.29.0
 
 # PyTorch & PyTorch Lightning
 torch>=2.1.0
-lightning>=2.0.0,<2.5.0
+lightning>=2.0.0,<2.6.0
 
-# PyTorch Forecasting
-pytorch-forecasting==0.10.3
+# PyTorch Forecasting (v1.8 supports Python 3.10-3.14, torch 2.x)
+pytorch-forecasting>=1.8.0
 
 # Data Processing
 pandas>=2.1.0
-numpy<2.0.0
+numpy>=1.24.0
 
 # Visualization
 matplotlib>=3.7.0
