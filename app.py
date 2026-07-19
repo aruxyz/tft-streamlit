@@ -2,9 +2,7 @@ import streamlit as st
 import pandas as pd
 import torch
 import pickle
-import io
 import numpy as np
-import matplotlib.pyplot as plt
 from datetime import datetime, timedelta
 import warnings
 warnings.filterwarnings('ignore')
@@ -18,19 +16,29 @@ except ImportError:
 
 st.set_page_config(
     page_title="Bogor Rain Forecast",
-    page_icon="🌧️",
     layout="wide",
-    initial_sidebar_state="expanded"
 )
 
-st.title("🌧️ Bogor Rainfall Forecasting (TFT Model)")
-st.write("Aplikasi demo skripsi untuk memprediksi curah hujan harian di Bogor menggunakan Temporal Fusion Transformer.")
+st.title("Bogor Rainfall Forecasting")
+st.write("Aplikasi demo skripsi untuk memprediksi curah hujan harian di Bogor menggunakan Temporal Fusion Transformer (horizon 1 hari).")
 st.markdown("---")
 
 ENCODER_LENGTH = 90
-PREDICTION_LENGTH = 7
+PREDICTION_LENGTH = 1
 TRAIN_OFFSET = 4915
-BMKG_START_DATE = pd.Timestamp('2025-06-01')
+DEFAULT_START_DATE = pd.Timestamp('2025-06-01')
+
+# Static validation metrics from TFT-H1 training (summary.json), for display
+# alongside each forecast so users see the model's general error margin.
+VAL_MAE = 5.3735
+VAL_RMSE = 8.0754
+VAL_N = 1236
+
+
+def _fmt_id(n):
+    """Format integer with dot thousands separator (Indonesian style)."""
+    return f"{n:,}".replace(",", ".")
+
 
 @st.cache_resource
 def load_model_and_metadata():
@@ -38,57 +46,59 @@ def load_model_and_metadata():
         with open("models/dataset_metadata.pkl", "rb") as f:
             metadata = pickle.load(f)
 
-        checkpoint = torch.load(
-            "models/tft_model_final_chronological.ckpt",
-            map_location=torch.device("cpu"),
-            weights_only=False
-        )
-
-        unknown_params = ['dataset_parameters', 'mask_bias', 'monotone_constraints']
-        for param in unknown_params:
-            if param in checkpoint["hyper_parameters"]:
-                del checkpoint["hyper_parameters"][param]
-
-        buffer = io.BytesIO()
-        torch.save(checkpoint, buffer)
-        buffer.seek(0)
-
+        # TFT-H1 checkpoint: 1-day horizon, QuantileLoss, leaky_chrono split.
+        # Loads cleanly under pytorch-forecasting==0.10.3.
         model = TemporalFusionTransformer.load_from_checkpoint(
-            buffer,
-            map_location=torch.device("cpu")
+            "models/tft-leaky_chrono_h1-epoch=07-val_loss=2.937.ckpt",
+            map_location=torch.device("cpu"),
         )
         model.eval()
 
-        return model, metadata
+        # Detect whether the model was trained with QuantileLoss (can produce
+        # real P10/P50/P90) or a point loss like MAE (only median available).
+        # TFT-H1 uses QuantileLoss with quantiles [0.02, 0.1, 0.25, 0.5, 0.75, 0.9, 0.98].
+        loss_quantiles = getattr(model.loss, 'quantiles', None)
+        if loss_quantiles is not None:
+            has_real_quantiles = True
+            model_quantiles = list(loss_quantiles)
+        else:
+            # Model trained with point loss (MAE/MSE/etc) — no quantile heads.
+            # mode="quantiles" will return shape [..., 1] (only the median).
+            has_real_quantiles = False
+            model_quantiles = [0.5]
+
+        return model, metadata, model_quantiles, has_real_quantiles
     except Exception as e:
         st.error(f"Gagal memuat model: {str(e)}")
         raise
 
 with st.spinner('Sedang memuat model AI...'):
-    model, metadata = load_model_and_metadata()
-    st.success("Model TFT & Metadata Berhasil Dimuat!")
-    st.caption(f"Encoder: {ENCODER_LENGTH} hari | Prediksi: {PREDICTION_LENGTH} hari | Parameter: 393.559")
+    model, metadata, model_quantiles, has_real_quantiles = load_model_and_metadata()
+    st.success("Model & Metadata Berhasil Dimuat!")
 
 st.markdown("---")
 
 @st.cache_data
 def load_data():
     try:
-        train_df = pd.read_csv("data/bogor_daily_train_safe.csv")
+        train_df = pd.read_csv("data/bogor_daily_train_leaky_chrono.csv")
         train_df['date'] = pd.to_datetime(train_df['date'])
         train_df = train_df.sort_values('date').reset_index(drop=True)
         train_df['time_idx'] = range(len(train_df))
         train_df['group_id'] = 'Bogor'
-        for col in ['month', 'day_of_week', 'uvIndex']:
+        # Categoricals must be string dtype for TimeSeriesDataSet.
+        # month/day_of_week/uvIndex = time_varying_known_categoricals,
+        # is_extreme_rain = time_varying_unknown_categoricals (TFT-H1).
+        for col in ['month', 'day_of_week', 'uvIndex', 'is_extreme_rain']:
             if col in train_df.columns:
                 train_df[col] = train_df[col].astype(str)
 
-        val_df = pd.read_csv("data/bogor_daily_val_safe.csv")
+        val_df = pd.read_csv("data/bogor_daily_val_leaky_chrono.csv")
         val_df['date'] = pd.to_datetime(val_df['date'])
         val_df = val_df.sort_values('date').reset_index(drop=True)
         val_df['time_idx'] = range(TRAIN_OFFSET, TRAIN_OFFSET + len(val_df))
         val_df['group_id'] = 'Bogor'
-        for col in ['month', 'day_of_week', 'uvIndex']:
+        for col in ['month', 'day_of_week', 'uvIndex', 'is_extreme_rain']:
             if col in val_df.columns:
                 val_df[col] = val_df[col].astype(str)
 
@@ -102,32 +112,44 @@ train_df, val_df = load_data()
 if train_df is None or val_df is None:
     st.stop()
 
-@st.cache_data
-def load_bmkg_data():
-    try:
-        bmkg = pd.read_csv("data/juni.csv")
-        bmkg['TANGGAL'] = pd.to_datetime(bmkg['TANGGAL'], format='%d-%m-%Y')
-        bmkg = bmkg.sort_values('TANGGAL').reset_index(drop=True)
-        return bmkg
-    except Exception as e:
-        st.error(f"Gagal memuat data aktual BMKG: {str(e)}")
-        return None
+def build_forecast_frame(val_df, train_df, start_date):
+    """Build the extended dataframe used for TFT prediction.
 
-bmkg_data = load_bmkg_data()
+    Slices the encoder window by date (`>= encoder_start`) and appends
+    placeholder rows for forecast dates beyond val_df's last observed date.
+    Placeholder rows increment `time_idx` from the last observed row so the
+    `time_idx` column stays contiguous per group (required by
+    TimeSeriesDataSet).
+    """
+    forecast_dates = pd.date_range(start_date, periods=PREDICTION_LENGTH, freq='D')
+    encoder_start = start_date - pd.Timedelta(days=ENCODER_LENGTH)
 
-if bmkg_data is None:
-    st.stop()
-
-def build_bmkg_forecast_frame(val_df, train_df):
     val_extended = val_df.copy()
-    forecast_dates = pd.date_range(BMKG_START_DATE, periods=PREDICTION_LENGTH, freq='D')
+    last_observed_date = val_extended['date'].max()
+    last_forecast_date = forecast_dates[-1]
+
+    # Fill EVERY day between the last observed date and the last forecast
+    # date (inclusive), not just the forecast target date(s). If the user
+    # picks a date more than 1 day beyond val_df's last observed date, only
+    # placeholder-ing the target date(s) leaves a hole in the time series
+    # (e.g. val ends 2025-06-01, target=2025-07-01 -> 2025-06-02..06-30
+    # would be missing), which breaks TimeSeriesDataSet's contiguous
+    # time_idx requirement: the encoder needs ENCODER_LENGTH unbroken days
+    # immediately before the prediction window, or from_dataset(predict=True)
+    # raises "filters should not remove all entries".
+    if last_forecast_date > last_observed_date:
+        fill_dates = pd.date_range(last_observed_date + pd.Timedelta(days=1), last_forecast_date, freq='D')
+    else:
+        fill_dates = pd.DatetimeIndex([])
+
     existing_dates = set(val_extended['date'])
-    missing_dates = [d for d in forecast_dates if d not in existing_dates]
+    missing_dates = [d for d in fill_dates if d not in existing_dates]
 
     if missing_dates:
         last_row = val_extended.iloc[-1].copy()
+        last_time_idx = int(last_row['time_idx'])
         placeholder_rows = []
-        for date in missing_dates:
+        for i, date in enumerate(missing_dates, start=1):
             new_row = last_row.copy()
             new_row['date'] = date
             new_row['precipMM'] = 0.0
@@ -135,44 +157,67 @@ def build_bmkg_forecast_frame(val_df, train_df):
             new_row['day_of_week'] = str(date.dayofweek + 1)
             new_row['day_of_year'] = date.dayofyear
             new_row['year'] = date.year
+            new_row['time_idx'] = last_time_idx + i
+            # is_extreme_rain is a time_varying_unknown_categorical in TFT-H1;
+            # placeholder rows set it to '0' (string) before the dtype cast below.
+            new_row['is_extreme_rain'] = '0'
             placeholder_rows.append(new_row)
-        val_extended = pd.concat(
-            [val_extended, pd.DataFrame(placeholder_rows)],
-            ignore_index=True
-        )
+        val_extended = pd.concat([val_extended, pd.DataFrame(placeholder_rows)], ignore_index=True)
 
     val_extended = val_extended.sort_values('date').reset_index(drop=True)
     for col in val_extended.columns:
         if col not in ['date', 'group_id'] and val_extended[col].dtype != 'object':
             val_extended[col] = val_extended[col].ffill().bfill()
-    for col in ['month', 'day_of_week', 'uvIndex']:
+    for col in ['month', 'day_of_week', 'uvIndex', 'is_extreme_rain']:
         if col in val_extended.columns:
             val_extended[col] = val_extended[col].astype(str)
 
-    # Persis seperti Kaggle notebook SS7
-    full_extended = pd.concat(
-        [train_df, val_extended.iloc[-(ENCODER_LENGTH + PREDICTION_LENGTH):]],
-        ignore_index=True
-    )
-    for col in ['month', 'day_of_week', 'uvIndex', 'group_id']:
+    # Date-based slice: encoder_start to the last forecast date. Truncating
+    # at forecast_dates[-1] ensures the user's selected forecast window is
+    # always the LAST PREDICTION_LENGTH rows — which is what TFT's
+    # from_dataset(predict=True) uses as the prediction target. Without this
+    # upper bound, picking a historical date would cause TFT to predict for
+    # val_df's tail instead of the selected date.
+    last_forecast_date = forecast_dates[-1]
+    val_window = val_extended[
+        (val_extended['date'] >= encoder_start) &
+        (val_extended['date'] <= last_forecast_date)
+    ].copy()
+    full_extended = pd.concat([train_df, val_window], ignore_index=True)
+    for col in ['month', 'day_of_week', 'uvIndex', 'is_extreme_rain', 'group_id']:
         if col in full_extended.columns:
             full_extended[col] = full_extended[col].astype(str)
 
     return full_extended
 
-selected_date = BMKG_START_DATE.date()
+# --- Sidebar: date picker ---------------------------------------------------
+# min_value: need at least ENCODER_LENGTH days of history before the start date
+# max_value: allow predicting up to 30 days beyond val_df's last observed date
+min_date = (val_df['date'].min() + timedelta(days=ENCODER_LENGTH)).date()
+max_date = (val_df['date'].max() + timedelta(days=30)).date()
+default_date = DEFAULT_START_DATE.date()
+if default_date < min_date:
+    default_date = min_date
+if default_date > max_date:
+    default_date = max_date
 
-st.sidebar.info(f"""
-📋 **Mode Validasi BMKG:**
-- Periode Prediksi: **1-7 Juni 2025**
-- Input Encoder: **{ENCODER_LENGTH} hari** data historis
-- Output Decoder: **{PREDICTION_LENGTH} hari** prediksi ke depan
-- Fitur Input: **25 variabel** cuaca & derived
-- Ground Truth: **BMKG Stasiun Bogor (`juni.csv`)**
-""")
+st.markdown("### Pilih Tanggal Prediksi")
+selected_date = st.date_input(
+    "Tanggal Prediksi",
+    value=default_date,
+    min_value=min_date,
+    max_value=max_date,
+    help=(
+        f"Prediksi 1 hari ke depan untuk tanggal ini. "
+        f"Encoder menggunakan {ENCODER_LENGTH} hari historis sebelum tanggal ini. "
+        f"Rentang valid: {min_date.strftime('%d %b %Y')} s/d {max_date.strftime('%d %b %Y')}."
+    )
+)
 
 prediction_start = pd.Timestamp(selected_date)
 encoder_start = prediction_start - timedelta(days=ENCODER_LENGTH)
+
+total_obs = len(train_df) + len(val_df)
 
 df_encoder = val_df[
     (val_df['date'] >= encoder_start) &
@@ -196,14 +241,14 @@ with col_btn2:
 
 if predict_btn:
     st.markdown("---")
-    st.subheader(f"Hasil Forecast: {PREDICTION_LENGTH} Hari Mulai {selected_date.strftime('%d %B %Y')}")
+    st.subheader(f"Hasil Forecast untuk {prediction_start.strftime('%d %B %Y')}")
 
-    with st.spinner('Sedang memproses prediksi dengan model TFT...'):
+    with st.spinner('Sedang memproses prediksi...'):
         progress_bar = st.progress(0)
         progress_bar.progress(20)
 
         try:
-            df_pred = build_bmkg_forecast_frame(val_df, train_df)
+            df_pred = build_forecast_frame(val_df, train_df, prediction_start)
 
             dataset = TimeSeriesDataSet.from_dataset(
                 metadata,
@@ -216,193 +261,148 @@ if predict_btn:
 
             progress_bar.progress(50)
 
-            prediction_result = model.predict(val_dataloader, mode="prediction", return_x=True)
+            # TFT-H1 was trained with QuantileLoss, so mode="quantiles" returns
+            # shape [batch, horizon, n_quantiles] with n_quantiles = 7
+            # ([0.02, 0.1, 0.25, 0.5, 0.75, 0.9, 0.98]). Only P50 (median, idx 3)
+            # is used as the point prediction; the other quantiles are not
+            # surfaced in the UI.
+            #
+            # Fallback path: model trained with a point loss (MAE/MSE/etc),
+            # mode="quantiles" would return shape [..., 1] (only the median),
+            # so we use mode="prediction" directly instead.
 
-            if hasattr(prediction_result, "output"):
-                predictions_raw = prediction_result.output
-            elif isinstance(prediction_result, tuple):
-                predictions_raw = prediction_result[0]
+            def _find_q_idx(q_target, qs, tol=1e-6):
+                for i, q in enumerate(qs):
+                    if abs(float(q) - q_target) < tol:
+                        return i
+                return None
+
+            if has_real_quantiles:
+                prediction_result = model.predict(val_dataloader, mode="quantiles", return_x=True)
+
+                if hasattr(prediction_result, "output"):
+                    quantiles_raw = prediction_result.output
+                elif isinstance(prediction_result, (tuple, list)):
+                    quantiles_raw = prediction_result[0]
+                else:
+                    quantiles_raw = prediction_result
+
+                quantiles_arr = quantiles_raw.detach().cpu().numpy()
+
+                # Expected shape: [batch, horizon, n_quantiles]. Take last sample.
+                if len(quantiles_arr.shape) == 3:
+                    quantiles_arr = quantiles_arr[-1]  # [horizon, n_quantiles]
+                elif len(quantiles_arr.shape) == 2:
+                    quantiles_arr = quantiles_arr[-PREDICTION_LENGTH:, :]
+
+                quantiles_arr = quantiles_arr[:PREDICTION_LENGTH, :]
+
+                p50_idx = _find_q_idx(0.5, model_quantiles)
+                if p50_idx is None: p50_idx = 3
+
+                progress_bar.progress(70)
+
+                p50 = np.maximum(quantiles_arr[:, p50_idx], 0)
+                predictions = p50  # P50 as point prediction
             else:
-                predictions_raw = prediction_result
+                # Fallback: point-loss model. Use mode="prediction" directly.
+                prediction_result = model.predict(val_dataloader, mode="prediction", return_x=True)
 
-            predictions_arr = predictions_raw.detach().cpu().numpy()
+                if hasattr(prediction_result, "output"):
+                    predictions_raw = prediction_result.output
+                elif isinstance(prediction_result, (tuple, list)):
+                    predictions_raw = prediction_result[0]
+                else:
+                    predictions_raw = prediction_result
 
-            if len(predictions_arr.shape) == 2:
-                predictions_arr = predictions_arr[-1]
-            elif len(predictions_arr.shape) == 1:
-                predictions_arr = predictions_arr[-PREDICTION_LENGTH:]
+                predictions_arr = predictions_raw.detach().cpu().numpy()
+                if len(predictions_arr.shape) == 2:
+                    predictions_arr = predictions_arr[-1]
+                elif len(predictions_arr.shape) == 1:
+                    predictions_arr = predictions_arr[-PREDICTION_LENGTH:]
+                predictions_arr = predictions_arr[:PREDICTION_LENGTH]
 
-            predictions_arr = predictions_arr[:PREDICTION_LENGTH]
+                progress_bar.progress(70)
 
-            progress_bar.progress(70)
-
-            predictions = np.maximum(predictions_arr, 0)
-            p10 = np.maximum(predictions_arr * 0.8, 0)
-            p50 = predictions
-            p90 = np.maximum(predictions_arr * 1.2, 0)
-
-            bmkg_7day = bmkg_data.head(PREDICTION_LENGTH).copy()
-            forecast_dates = list(bmkg_7day['TANGGAL'])
-            actual_7day = bmkg_7day['RR'].to_numpy()
-            errors = np.abs(predictions - actual_7day)
-            mae_bmkg = float(np.mean(errors))
-            rmse_bmkg = float(np.sqrt(np.mean((predictions - actual_7day) ** 2)))
-
-            df_forecast = pd.DataFrame({
-                'date': forecast_dates,
-                'pred_p10': p10,
-                'pred_p50': p50,
-                'pred_p90': p90,
-                'actual_bmkg': actual_7day,
-                'error_abs': errors,
-                'rainfall_mm': predictions,
-                'type': 'prediksi'
-            })
-
-            df_historical = df_encoder[['date', 'precipMM']].copy()
-            df_historical.columns = ['date', 'rainfall_mm']
-            df_historical['type'] = 'historis'
+                predictions = np.maximum(predictions_arr, 0)
+                p50 = predictions
 
             progress_bar.progress(100)
-            st.success(f"Prediksi Berhasil! MAE={mae_bmkg:.2f} mm/hari | RMSE={rmse_bmkg:.2f} mm/hari")
 
-            col_chart, col_stats = st.columns([2, 1])
+            pred_val = float(predictions[0])
+            p50_val = float(p50[0])
 
-            with col_chart:
-                st.subheader("Grafik Prediksi TFT vs Aktual BMKG")
-                fig, ax = plt.subplots(figsize=(12, 6))
+            st.success(
+                f"Prediksi Berhasil untuk {prediction_start.strftime('%d %B %Y')}! "
+                f"Prediksi = {p50_val:.2f} mm."
+            )
 
-                days = list(range(1, PREDICTION_LENGTH + 1))
+            st.subheader("Ringkasan Prediksi")
 
-                ax.fill_between(
-                    days,
-                    np.minimum(actual_7day, predictions),
-                    np.maximum(actual_7day, predictions),
-                    alpha=0.2,
-                    color='gray',
-                    label='Area Error'
-                )
+            def rain_category(mm):
+                """Klasifikasi intensitas curah hujan berdasarkan ambang resmi."""
+                if mm < 0.5:
+                    return "Tidak Hujan"
+                elif mm <= 20:
+                    return "Hujan Ringan"
+                elif mm <= 50:
+                    return "Hujan Sedang"
+                else:
+                    return "Hujan Lebat"
 
-                ax.plot(
-                    days,
-                    actual_7day,
-                    color='black',
-                    linewidth=2,
-                    label='Aktual BMKG',
-                    marker='o',
-                    markersize=8
-                )
+            rain_cat = rain_category(p50_val)
 
-                ax.plot(
-                    days,
-                    predictions,
-                    color='steelblue',
-                    linewidth=2,
-                    label='Prediksi TFT',
-                    marker='s',
-                    markersize=8
-                )
-
-                ax.set_xlabel('Tanggal')
-                ax.set_ylabel('Curah Hujan (mm)')
-                ax.set_title(f'Prediksi TFT vs Aktual BMKG (1-7 Juni 2025)\nMAE={mae_bmkg:.2f} mm, RMSE={rmse_bmkg:.2f} mm')
-                ax.legend(loc='best')
-                ax.grid(True, alpha=0.3)
-                ax.set_xlim(0.5, PREDICTION_LENGTH + 0.5)
-                ax.set_xticks(days)
-                ax.set_xticklabels([d.strftime('%d %b') for d in forecast_dates], rotation=45, ha='right')
-
-                plt.tight_layout()
-                st.pyplot(fig)
-                plt.close()
-
-            with col_stats:
-                st.subheader("Ringkasan Prediksi")
-
-                def bmkg_category(mm):
-                    if mm < 0.5:
-                        return "Tidak Hujan", "☀️"
-                    elif mm <= 20:
-                        return "Hujan Ringan", "🌤️"
-                    elif mm <= 50:
-                        return "Hujan Sedang", "🌧️"
-                    else:
-                        return "Hujan Lebat", "⛈️"
-
-                first_day_rain = predictions[0]
-                rain_cat, rain_emoji = bmkg_category(first_day_rain)
-
+            col_main, col_mae, col_rmse = st.columns([2, 1, 1])
+            with col_main:
                 st.metric(
-                    f"{rain_emoji} Prediksi 1 Juni",
-                    f"{first_day_rain:.1f} mm",
+                    f"Prediksi {prediction_start.strftime('%d %b')}",
+                    f"{p50_val:.1f} mm",
                     rain_cat,
                     delta_color="normal"
                 )
+            with col_mae:
+                st.metric("MAE Model", f"{VAL_MAE:.2f} mm/hari")
+            with col_rmse:
+                st.metric("RMSE Model", f"{VAL_RMSE:.2f} mm/hari")
 
-                st.markdown("---")
-
-                avg_rain_7d = np.mean(predictions)
-                max_rain_day = np.argmax(predictions) + 1
-                max_rain_val = max(predictions)
-
-                col_m1, col_m2 = st.columns(2)
-
-                col_m1.metric(
-                    "MAE vs BMKG",
-                    f"{mae_bmkg:.2f} mm"
-                )
-
-                col_m2.metric(
-                    "RMSE vs BMKG",
-                    f"{rmse_bmkg:.2f} mm"
-                )
-
-                st.caption(f"Rata-rata prediksi: {avg_rain_7d:.1f} mm | Hari prediksi terbasah: H+{max_rain_day} ({max_rain_val:.1f} mm)")
-
-                st.markdown("### Tabel Prediksi Detail")
-                df_table = pd.DataFrame({
-                    'Hari': [f"H+{i+1}" for i in range(PREDICTION_LENGTH)],
-                    'Tanggal': [d.strftime('%d %B %Y') for d in forecast_dates],
-                    'Aktual BMKG': np.round(actual_7day, 2),
-                    'Prediksi TFT': np.round(predictions, 2),
-                    'Error Absolut': np.round(errors, 2),
-                    'Kategori': [bmkg_category(v)[0] for v in predictions],
-                    'Emoji': [bmkg_category(v)[1] for v in predictions],
-                })
-
-                st.dataframe(
-                    df_table.style.background_gradient(
-                        cmap='Reds',
-                        subset=['Error Absolut']
-                    ),
-                    use_container_width=True,
-                    hide_index=True
-                )
+            st.markdown("---")
+            st.markdown("### Tabel Prediksi Detail")
+            df_table = pd.DataFrame({
+                'Tanggal': [prediction_start.strftime('%d %B %Y')],
+                'Prediksi (mm)': [round(p50_val, 2)],
+                'Kategori': [rain_cat],
+            })
+            st.dataframe(
+                df_table,
+                use_container_width=True,
+                hide_index=True
+            )
 
             st.markdown("---")
             st.subheader("Rekomendasi Berdasarkan Prediksi")
-            rainy_days = sum(1 for p in predictions if p > 0.5)
-            heavy_rain_days = sum(1 for p in predictions if p > 20)
+            date_label = prediction_start.strftime('%d %B %Y')
+            rain_today = p50_val > 0.5
+            heavy_rain_today = p50_val > 20
 
-            if rainy_days == 0:
-                st.info("Prediksi cuaca cerah untuk 7 hari ke depan. Bagus untuk aktivitas luar ruangan!")
-            elif rainy_days <= 2:
-                st.warning("Diperkirakan beberapa hari berpotensi hujan ringan. Siapkan payung jika beraktivitas di luar.")
-            elif rainy_days <= 4:
-                st.warning("Prediksi cuaca cukup basah. Pertimbangkan untuk membawa jas hujan dan perlengkapan anti-air.")
+            if not rain_today:
+                st.info(f"Prediksi untuk {date_label}: cuaca cerah (Tidak Hujan, <0.5 mm). Bagus untuk aktivitas luar ruangan!")
+            elif p50_val <= 20:
+                st.warning(f"Prediksi untuk {date_label}: hujan ringan ({p50_val:.1f} mm). Siapkan payung jika beraktivitas di luar.")
+            elif p50_val <= 50:
+                st.warning(f"Prediksi untuk {date_label}: hujan sedang ({p50_val:.1f} mm). Pertimbangkan untuk membawa jas hujan dan perlengkapan anti-air.")
             else:
-                st.error("Prediksi curah hujan tinggi untuk minggu ini. Hindari aktivitas di luar dan waspada terhadap potensi banjir.")
+                st.error(f"Prediksi untuk {date_label}: curah hujan tinggi ({p50_val:.1f} mm). Hindari aktivitas di luar dan waspada terhadap potensi banjir.")
 
-            if heavy_rain_days > 0:
-                st.error(f"Peringatan: Diperkirakan ada {heavy_rain_days} hari dengan hujan sedang/lebat. Harap berhati-hati!")
+            if heavy_rain_today:
+                st.error(f"Peringatan: Prediksi hujan sedang/lebat untuk {date_label} ({p50_val:.1f} mm). Harap berhati-hati!")
 
         except Exception as e:
             st.error(f"Terjadi kesalahan saat prediksi: {str(e)}")
             st.exception(e)
 
 st.markdown("---")
-st.caption("""
-💻 **Powered by:** Temporal Fusion Transformer (TFT) + PyTorch Lightning + Streamlit
-📊 **Dataset:** Data curah hujan harian Bogor (2008-2025, 6.122 observasi)
-🎓 **Project:** Skripsi - Prediksi Curah Hujan dengan Deep Learning
+st.caption(f"""
+**Powered by:** Temporal Fusion Transformer + PyTorch Lightning + Streamlit
+**Dataset:** Data curah hujan harian Bogor (2008-2025, {_fmt_id(total_obs)} observasi — train {_fmt_id(len(train_df))} + val {_fmt_id(len(val_df))})
+**Project:** Skripsi - Prediksi Curah Hujan dengan Deep Learning
 """)

@@ -49,6 +49,7 @@ ENV/
 # Logs
 *.log
 logs/
+lightning_logs/
 
 # OS
 .DS_Store

@@ -12,7 +12,11 @@ from pytorch_forecasting.data import GroupNormalizer
 
 # Load checkpoint to get dataset parameters
 print("Loading checkpoint...")
-checkpoint = torch.load('models/tft_model_final.ckpt', map_location='cpu')
+checkpoint = torch.load(
+    'models/tft_model_final_chronological.ckpt',
+    map_location='cpu',
+    weights_only=False,
+)
 
 # Extract dataset parameters
 dataset_params = checkpoint['hyper_parameters']['dataset_parameters']

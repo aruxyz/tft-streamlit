@@ -6,7 +6,11 @@ import io
 from pytorch_forecasting import TemporalFusionTransformer
 
 print("Loading checkpoint...")
-checkpoint = torch.load("models/tft_model_final.ckpt", map_location=torch.device("cpu"))
+checkpoint = torch.load(
+    "models/tft_model_final_chronological.ckpt",
+    map_location=torch.device("cpu"),
+    weights_only=False,
+)
 
 print(f"Original hyper_parameters keys: {list(checkpoint['hyper_parameters'].keys())}")
 
