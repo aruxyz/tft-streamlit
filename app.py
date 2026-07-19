@@ -1,4 +1,6 @@
 import streamlit as st
+import sys
+import types
 import pandas as pd
 import torch
 import pickle
@@ -6,6 +8,15 @@ import numpy as np
 from datetime import datetime, timedelta
 import warnings
 warnings.filterwarnings('ignore')
+
+# pandas 2.0 removed Int64Index/UInt64Index/Float64Index, but the TFT
+# checkpoint was trained with pandas 1.x which embedded these classes.
+# Register shim module so torch.load can unpickle the checkpoint.
+_numeric = types.ModuleType("pandas.core.indexes.numeric")
+_numeric.Int64Index = pd.Index
+_numeric.UInt64Index = pd.Index
+_numeric.Float64Index = pd.Index
+sys.modules["pandas.core.indexes.numeric"] = _numeric
 
 try:
     from pytorch_forecasting import TemporalFusionTransformer, TimeSeriesDataSet
@@ -46,7 +57,6 @@ def load_model_and_metadata():
             metadata = pickle.load(f)
 
         # TFT-H1 checkpoint: 1-day horizon, QuantileLoss, leaky_chrono split.
-        # Loads cleanly under pytorch-forecasting==0.10.3.
         model = TemporalFusionTransformer.load_from_checkpoint(
             "models/tft-leaky_chrono_h1-epoch=07-val_loss=2.937.ckpt",
             map_location=torch.device("cpu"),
