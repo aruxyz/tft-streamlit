@@ -24,6 +24,19 @@ except ImportError:
     st.error("Library pytorch_forecasting belum terinstall. Jalankan: pip install -r requirements.txt")
     st.stop()
 
+# pytorch-forecasting 0.10.x had a typo: "monotone_constaints" (missing 'r').
+# Fixed to "monotone_constraints" in 1.x. Patch __init__ to handle old checkpoints.
+import functools
+_orig_tft_init = TemporalFusionTransformer.__init__
+
+@functools.wraps(_orig_tft_init)
+def _patched_tft_init(self, **kwargs):
+    if "monotone_constaints" in kwargs:
+        kwargs["monotone_constraints"] = kwargs.pop("monotone_constaints")
+    return _orig_tft_init(self, **kwargs)
+
+TemporalFusionTransformer.__init__ = _patched_tft_init
+
 st.set_page_config(
     page_title="Bogor Rain Forecast",
     layout="wide",
