@@ -37,6 +37,24 @@ def _patched_tft_init(self, **kwargs):
 
 TemporalFusionTransformer.__init__ = _patched_tft_init
 
+# Lightning's _load_from_checkpoint calls model.to(device) AFTER loading,
+# which tries to move to CUDA even with map_location=cpu. Override to
+# force CPU since Streamlit Cloud has no GPU.
+import lightning.pytorch.core.saving as _pl_saving
+_orig_load_from_ckpt = _pl_saving._load_from_checkpoint
+
+@functools.wraps(_orig_load_from_ckpt)
+def _cpu_load_from_checkpoint(cls, checkpoint_path, map_location=None,
+                              hparams_file=None, weights_only=None,
+                              strict=None, **kwargs):
+    return _orig_load_from_ckpt(
+        cls, checkpoint_path, map_location=torch.device("cpu"),
+        hparams_file=hparams_file, weights_only=weights_only,
+        strict=strict, **kwargs,
+    )
+
+_pl_saving._load_from_checkpoint = _cpu_load_from_checkpoint
+
 st.set_page_config(
     page_title="Bogor Rain Forecast",
     layout="wide",
