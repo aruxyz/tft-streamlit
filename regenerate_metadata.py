@@ -61,15 +61,28 @@ all_cats = (
     + dp.get("time_varying_unknown_categoricals", [])
     + dp.get("static_categoricals", [])
 )
-fresh_cat_encoders = {cat: NaNLabelEncoder(add_nan=True) for cat in all_cats}
-fresh_cat_encoders["group_id"] = NaNLabelEncoder(add_nan=True)
-fresh_cat_encoders["__group_id__group_id"] = NaNLabelEncoder(add_nan=True)
 
 auto_added_reals = {"encoder_length", "precipMM_center", "precipMM_scale", "relative_time_idx"}
 filtered_static_reals = [r for r in dp.get("static_reals", []) if r not in auto_added_reals]
 filtered_known_reals = [r for r in dp.get("time_varying_known_reals", []) if r not in auto_added_reals]
 
-print("Creating TimeSeriesDataSet with fresh encoders...")
+# Reuse the ORIGINAL fitted encoders/scalers/normalizer from the checkpoint —
+# NOT fresh ones. The model's embedding layers were trained against the
+# exact category->index mapping of these encoders; a freshly re-fit encoder
+# can assign different indices to the same category values, causing
+# "IndexError: index out of range in self" in the embedding lookup at
+# inference time.
+orig_cat_encoders = dict(dp.get("categorical_encoders", {}))
+orig_scalers = dict(dp.get("scalers", {}))
+orig_target_normalizer = dp.get("target_normalizer")
+
+# pytorch-forecasting 0.10.3's GroupNormalizer pickled `groups` but not the
+# `_groups` attribute that 1.x's internals read from. Pickle restores
+# __dict__ directly (bypassing __init__), so patch it in.
+if orig_target_normalizer is not None and not hasattr(orig_target_normalizer, "_groups"):
+    orig_target_normalizer._groups = list(getattr(orig_target_normalizer, "groups", []) or [])
+
+print("Creating TimeSeriesDataSet with ORIGINAL fitted encoders/scalers...")
 metadata = TimeSeriesDataSet(
     data=train_df,
     time_idx=dp["time_idx"],
@@ -94,15 +107,9 @@ metadata = TimeSeriesDataSet(
     add_relative_time_idx=dp.get("add_relative_time_idx", True),
     add_target_scales=dp.get("add_target_scales", True),
     add_encoder_length=dp.get("add_encoder_length", True),
-    target_normalizer=GroupNormalizer(
-        method="standard",
-        groups=dp["group_ids"],
-        center=True,
-        scale_by_group=False,
-        transformation="log1p",
-    ),
-    categorical_encoders=fresh_cat_encoders,
-    scalers={},
+    target_normalizer=orig_target_normalizer,
+    categorical_encoders=orig_cat_encoders,
+    scalers=orig_scalers,
     randomize_length=None,
     predict_mode=False,
 )

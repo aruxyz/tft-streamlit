@@ -33,20 +33,32 @@ except ImportError:
 # training run, that forces a CUDA init even on CPU-only machines. Bypassing
 # Lightning's loading entirely (manual torch.load + direct instantiation)
 # avoids this and the typo issue in one pass.
-import inspect
-
-
+#
+# hyper_parameters is passed through as-is (no filtering): TFT's __init__
+# accepts **kwargs which forwards extras (output_transformer, optimizer,
+# etc.) to BaseModel.__init__ — filtering by TFT's own signature alone
+# drops params like output_transformer that BaseModel needs for rescaling
+# predictions back to the target's original scale.
 def load_tft_from_checkpoint_cpu(checkpoint_path):
     ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
     hparams = dict(ckpt["hyper_parameters"])
     if "monotone_constaints" in hparams:
         hparams["monotone_constraints"] = hparams.pop("monotone_constaints")
 
-    valid_params = set(inspect.signature(TemporalFusionTransformer.__init__).parameters.keys())
-    hparams = {k: v for k, v in hparams.items() if k in valid_params}
-
     model = TemporalFusionTransformer(**hparams)
     model.load_state_dict(ckpt["state_dict"])
+
+    # torchmetrics.Metric tracks its device in a plain `_device` attribute
+    # (not a tensor), set during .to(cuda) at training time. torch.load's
+    # map_location only remaps tensor storages, so this attribute stays
+    # "cuda:0" after loading — and any later .cpu()/.to() call crashes
+    # trying to probe torch.zeros(1, device="cuda:0") first. Force it to
+    # cpu directly on every torchmetrics.Metric submodule.
+    from torchmetrics import Metric as _TorchMetric
+    for submodule in model.modules():
+        if isinstance(submodule, _TorchMetric):
+            submodule._device = torch.device("cpu")
+
     model.eval()
     return model
 
@@ -311,7 +323,10 @@ if predict_btn:
                 return None
 
             if has_real_quantiles:
-                prediction_result = model.predict(val_dataloader, mode="quantiles", return_x=True)
+                prediction_result = model.predict(
+                    val_dataloader, mode="quantiles", return_x=True,
+                    trainer_kwargs={"accelerator": "cpu"},
+                )
 
                 if hasattr(prediction_result, "output"):
                     quantiles_raw = prediction_result.output
@@ -339,7 +354,10 @@ if predict_btn:
                 predictions = p50  # P50 as point prediction
             else:
                 # Fallback: point-loss model. Use mode="prediction" directly.
-                prediction_result = model.predict(val_dataloader, mode="prediction", return_x=True)
+                prediction_result = model.predict(
+                    val_dataloader, mode="prediction", return_x=True,
+                    trainer_kwargs={"accelerator": "cpu"},
+                )
 
                 if hasattr(prediction_result, "output"):
                     predictions_raw = prediction_result.output
