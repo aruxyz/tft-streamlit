@@ -1,12 +1,8 @@
 # Launcher for the TFT-H1 Streamlit app.
 #
-# WHY THIS SCRIPT EXISTS:
-# The model checkpoint + dataset_metadata.pkl were created with pandas 1.5.3 +
-# pytorch-forecasting 0.10.3 (the training environment, .venv-tft at the repo
-# root). Running `streamlit run app.py` with a DIFFERENT Python (e.g. the
-# global pyenv install with pandas 2.3.3) fails to unpickle the metadata with:
-#   ModuleNotFoundError: No module named 'pandas.core.indexes.numeric'
-# This script always uses .venv-tft's python, guaranteeing version parity.
+# .venv-tft (repo root, sibling of tft-streamlit/) is kept in sync with
+# requirements.txt (pytorch-forecasting>=1.8.0, torch>=2.1.0, pandas>=2.1.0).
+# This script always uses .venv-tft's python for a consistent environment.
 #
 # Usage: run this from anywhere, or double-click if .ps1 is associated:
 #   .\run.ps1
@@ -20,6 +16,6 @@ if (-not (Test-Path $venvPython)) {
     exit 1
 }
 
-Write-Host "Menjalankan Streamlit pakai $venvPython (version-matched dengan checkpoint TFT-H1)..." -ForegroundColor Cyan
+Write-Host "Menjalankan Streamlit pakai $venvPython..." -ForegroundColor Cyan
 Set-Location $scriptDir
 & $venvPython -m streamlit run app.py
