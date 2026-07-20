@@ -32,6 +32,23 @@ except ImportError:
     st.error("Library pytorch_forecasting belum terinstall. Jalankan: pip install -r requirements.txt")
     st.stop()
 
+# GLOBAL SAFETY NET: torchmetrics.Metric._apply() probes the metric's CURRENT
+# device via `torch.zeros(1, device=self.device)` before moving it — if
+# `self._device` is stale "cuda:0" (pickled from a GPU training run) on a
+# machine with no NVIDIA driver, that probe itself crashes. This app is
+# strictly CPU-only, so patch _apply at the class level to always probe on
+# cpu, regardless of whatever device value got carried over from pickling.
+# This covers every Metric instance (loss, logging_metrics, ...) without
+# needing to track down every model attribute individually.
+import torchmetrics
+_orig_metric_apply = torchmetrics.Metric._apply
+
+def _cpu_safe_metric_apply(self, fn, exclude_state=()):
+    self._device = torch.device("cpu")
+    return _orig_metric_apply(self, fn, exclude_state=exclude_state)
+
+torchmetrics.Metric._apply = _cpu_safe_metric_apply
+
 # pytorch-forecasting 0.10.x had a typo: "monotone_constaints" (missing 'r').
 # Fixed to "monotone_constraints" in 1.x.
 #
