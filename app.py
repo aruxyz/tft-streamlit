@@ -25,35 +25,30 @@ except ImportError:
     st.stop()
 
 # pytorch-forecasting 0.10.x had a typo: "monotone_constaints" (missing 'r').
-# Fixed to "monotone_constraints" in 1.x. Patch __init__ to handle old checkpoints.
-import functools
-_orig_tft_init = TemporalFusionTransformer.__init__
+# Fixed to "monotone_constraints" in 1.x.
+#
+# Lightning's LightningModule.load_from_checkpoint() always ends with
+# model.to(device) where device is inferred from the checkpoint's state_dict
+# tensors — NOT from map_location. Since this checkpoint was saved from a GPU
+# training run, that forces a CUDA init even on CPU-only machines. Bypassing
+# Lightning's loading entirely (manual torch.load + direct instantiation)
+# avoids this and the typo issue in one pass.
+import inspect
 
-@functools.wraps(_orig_tft_init)
-def _patched_tft_init(self, **kwargs):
-    if "monotone_constaints" in kwargs:
-        kwargs["monotone_constraints"] = kwargs.pop("monotone_constaints")
-    return _orig_tft_init(self, **kwargs)
 
-TemporalFusionTransformer.__init__ = _patched_tft_init
+def load_tft_from_checkpoint_cpu(checkpoint_path):
+    ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    hparams = dict(ckpt["hyper_parameters"])
+    if "monotone_constaints" in hparams:
+        hparams["monotone_constraints"] = hparams.pop("monotone_constaints")
 
-# Lightning's _load_from_checkpoint calls model.to(device) AFTER loading,
-# which tries to move to CUDA even with map_location=cpu. Override to
-# force CPU since Streamlit Cloud has no GPU.
-import lightning.pytorch.core.saving as _pl_saving
-_orig_load_from_ckpt = _pl_saving._load_from_checkpoint
+    valid_params = set(inspect.signature(TemporalFusionTransformer.__init__).parameters.keys())
+    hparams = {k: v for k, v in hparams.items() if k in valid_params}
 
-@functools.wraps(_orig_load_from_ckpt)
-def _cpu_load_from_checkpoint(cls, checkpoint_path, map_location=None,
-                              hparams_file=None, weights_only=None,
-                              strict=None, **kwargs):
-    return _orig_load_from_ckpt(
-        cls, checkpoint_path, map_location=torch.device("cpu"),
-        hparams_file=hparams_file, weights_only=weights_only,
-        strict=strict, **kwargs,
-    )
-
-_pl_saving._load_from_checkpoint = _cpu_load_from_checkpoint
+    model = TemporalFusionTransformer(**hparams)
+    model.load_state_dict(ckpt["state_dict"])
+    model.eval()
+    return model
 
 st.set_page_config(
     page_title="Bogor Rain Forecast",
@@ -88,11 +83,9 @@ def load_model_and_metadata():
             metadata = pickle.load(f)
 
         # TFT-H1 checkpoint: 1-day horizon, QuantileLoss, leaky_chrono split.
-        model = TemporalFusionTransformer.load_from_checkpoint(
-            "models/tft-leaky_chrono_h1-epoch=07-val_loss=2.937.ckpt",
-            map_location=torch.device("cpu"),
+        model = load_tft_from_checkpoint_cpu(
+            "models/tft-leaky_chrono_h1-epoch=07-val_loss=2.937.ckpt"
         )
-        model.eval()
 
         # Detect whether the model was trained with QuantileLoss (can produce
         # real P10/P50/P90) or a point loss like MAE (only median available).
