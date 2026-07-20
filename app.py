@@ -1,4 +1,12 @@
 import streamlit as st
+import os
+
+# Force CPU-only everywhere, regardless of local GPU availability. This app
+# is designed for CPU-only hosting (Streamlit Cloud has no GPU); hiding CUDA
+# devices entirely keeps local dev and prod behavior identical and avoids
+# Lightning's Trainer(accelerator="auto") picking up a local GPU.
+os.environ["CUDA_VISIBLE_DEVICES"] = ""
+
 import sys
 import types
 import pandas as pd
